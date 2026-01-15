@@ -41,8 +41,7 @@ python /home/chain1/zl/chain/Heimdall/src/build_episodes_after_receipt.py \
 
 注意
 ----
-1) 本脚本只用 transactions 表（from_address/to_address/value/input 等）构造 episode。
-   如需 token 级别动作（Transfer/Swap），可在下一步把 episode 中 tx_hash 关联 decoded_events。
+1) 本脚本默认从 transactions 构造 episode，并可选地从 decoded_events 补充事件信息。
 2) crossdata 字段名可能不一致：脚本会自动探测；如探测不准，用 --recv_col/--chain_col/--ts_col 覆盖。
 """
 
@@ -68,6 +67,21 @@ from crossdata_schema import detect_crossdata_columns, canonical_chain, to_utc_t
 
 
 TX_REQUIRED_COLS = ["block_timestamp", "transaction_hash", "from_address", "to_address", "value", "input"]
+EVENT_REQUIRED_COLS = [
+    "block_timestamp",
+    "transaction_hash",
+    "log_index",
+    "event_name",
+    "contract_address",
+    "address",
+    "from_address",
+    "to_address",
+    "token_address",
+    "amount",
+    "value",
+    "sender",
+    "recipient",
+]
 
 
 # ----------------------------
@@ -89,6 +103,16 @@ def ts_iso(ts: Optional[pd.Timestamp]) -> Optional[str]:
 def chunked(seq: Sequence, n: int) -> Iterable[Sequence]:
     for i in range(0, len(seq), n):
         yield seq[i : i + n]
+
+
+def pick_col(cols: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
+    low = {c.lower(): c for c in cols}
+    for c in candidates:
+        if c in cols:
+            return c
+        if c.lower() in low:
+            return low[c.lower()]
+    return None
 
 
 # ----------------------------
@@ -179,16 +203,101 @@ class TxDatasetCache:
 
 
 # ----------------------------
+# Decoded events scanning
+# ----------------------------
+@dataclass
+class DecodedEventsDataset:
+    chain: str
+    dataset: ds.Dataset
+    ts_field: str = "block_timestamp"
+    tx_hash_field: str = "transaction_hash"
+
+    @property
+    def schema(self) -> pa.Schema:
+        return self.dataset.schema
+
+    @property
+    def available_cols(self) -> List[str]:
+        return list(self.schema.names)
+
+    def _ts_scalar(self, ts: pd.Timestamp) -> pa.Scalar:
+        ftype = self.schema.field(self.ts_field).type
+        py_dt = ts.to_pydatetime()
+        return pa.scalar(py_dt, type=ftype)
+
+    def scan(
+        self,
+        tx_hashes: Sequence[str],
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        columns: Sequence[str],
+        hash_chunk: int = 2000,
+    ) -> pa.Table:
+        if not tx_hashes:
+            return pa.table({c: pa.array([], type=self.schema.field(c).type) for c in columns if c in self.schema.names})
+
+        cols = [c for c in columns if c in self.schema.names]
+        if not cols:
+            return pa.table({})
+
+        ts_start = self._ts_scalar(start)
+        ts_end = self._ts_scalar(end)
+
+        tables: List[pa.Table] = []
+        for h_part in chunked(list(tx_hashes), hash_chunk):
+            expr = (
+                (ds.field(self.ts_field) >= ts_start)
+                & (ds.field(self.ts_field) < ts_end)
+                & ds.field(self.tx_hash_field).isin([h for h in h_part])
+            )
+            t = self.dataset.to_table(columns=cols, filter=expr)
+            if t.num_rows:
+                tables.append(t)
+
+        if not tables:
+            empty_arrays = {}
+            for c in cols:
+                empty_arrays[c] = pa.array([], type=self.schema.field(c).type)
+            return pa.table(empty_arrays)
+
+        if len(tables) == 1:
+            return tables[0]
+        return pa.concat_tables(tables, promote=True)
+
+
+class DecodedEventsDatasetCache:
+    def __init__(self, events_root: str):
+        self.events_root = os.path.expanduser(events_root)
+        self._cache: Dict[str, DecodedEventsDataset] = {}
+
+    def get(self, chain: str) -> Optional[DecodedEventsDataset]:
+        chain = canonical_chain(chain) or chain
+        if chain in self._cache:
+            return self._cache[chain]
+
+        events_dir = os.path.join(self.events_root, chain, "decoded_events")
+        if not os.path.isdir(events_dir):
+            return None
+
+        dset = ds.dataset(events_dir, format="parquet")
+        evds = DecodedEventsDataset(chain=chain, dataset=dset)
+        self._cache[chain] = evds
+        return evds
+
+
+# ----------------------------
 # Episode building
 # ----------------------------
 def build_episodes_for_receipts(
     receipts: pd.DataFrame,
     tx_cache: TxDatasetCache,
+    events_cache: Optional[DecodedEventsDatasetCache],
     window_minutes: int,
     start_offset_minutes: int,
     bucket_minutes: int,
     max_txs_per_episode: int,
     tx_addr_chunk: int,
+    event_hash_chunk: int,
 ) -> pd.DataFrame:
     """
     receipts 必须包含:
@@ -269,6 +378,85 @@ def build_episodes_for_receipts(
             txdf = txdf.sort_values(["from_address", "block_timestamp"], kind="mergesort")
             grouped = {addr: g for addr, g in txdf.groupby("from_address", sort=False)}
 
+            event_actions_by_tx: Dict[str, List[Dict[str, object]]] = {}
+            if events_cache is not None and "transaction_hash" in txdf.columns:
+                evds = events_cache.get(chain)
+                if evds is not None:
+                    tx_hashes = (
+                        txdf["transaction_hash"]
+                        .dropna()
+                        .astype(str)
+                        .str.lower()
+                        .unique()
+                        .tolist()
+                    )
+                    if tx_hashes:
+                        ev_cols = [c for c in EVENT_REQUIRED_COLS if c in evds.available_cols]
+                        if ev_cols:
+                            ev_tbl = evds.scan(
+                                tx_hashes=tx_hashes,
+                                start=t_start,
+                                end=t_end,
+                                columns=ev_cols,
+                                hash_chunk=event_hash_chunk,
+                            )
+                            if ev_tbl.num_rows:
+                                evdf = ev_tbl.to_pandas()
+                                if "transaction_hash" in evdf.columns:
+                                    evdf["transaction_hash"] = evdf["transaction_hash"].astype(str).str.lower()
+                                if "block_timestamp" in evdf.columns:
+                                    evdf["block_timestamp"] = pd.to_datetime(evdf["block_timestamp"], utc=True, errors="coerce")
+                                for addr_col in ["from_address", "to_address", "token_address", "address", "contract_address", "sender", "recipient"]:
+                                    if addr_col in evdf.columns:
+                                        evdf[addr_col] = evdf[addr_col].astype(str).str.lower()
+                                        evdf.loc[evdf[addr_col].isin(["none", "nan", "null"]), addr_col] = None
+
+                                ts_col = pick_col(evdf.columns, ["block_timestamp"])
+                                tx_col = pick_col(evdf.columns, ["transaction_hash", "tx_hash"])
+                                log_col = pick_col(evdf.columns, ["log_index", "event_index", "log_idx"])
+                                name_col = pick_col(evdf.columns, ["event_name", "name", "event"])
+                                contract_col = pick_col(evdf.columns, ["contract_address", "address"])
+                                from_col = pick_col(evdf.columns, ["from_address", "from", "sender"])
+                                to_col = pick_col(evdf.columns, ["to_address", "to", "recipient"])
+                                token_col = pick_col(evdf.columns, ["token_address", "token", "asset_address"])
+                                amount_col = pick_col(evdf.columns, ["amount", "value", "amount_raw"])
+
+                                if ts_col and tx_col:
+                                    sort_cols = [tx_col, ts_col]
+                                    if log_col:
+                                        sort_cols.append(log_col)
+                                    evdf = evdf.sort_values(sort_cols, kind="mergesort")
+                                    for row in evdf.itertuples(index=False):
+                                        txh = getattr(row, tx_col, None)
+                                        if not txh:
+                                            continue
+                                        ts = getattr(row, ts_col, None)
+                                        event_action: Dict[str, object] = {
+                                            "ts": ts_iso(pd.Timestamp(ts) if ts is not None else None),
+                                            "tx_hash": txh,
+                                        }
+                                        if log_col:
+                                            event_action["log_index"] = getattr(row, log_col, None)
+                                        if name_col:
+                                            event_action["event_name"] = getattr(row, name_col, None)
+                                        if contract_col:
+                                            event_action["contract"] = getattr(row, contract_col, None)
+                                        if from_col:
+                                            event_action["from"] = getattr(row, from_col, None)
+                                        if to_col:
+                                            event_action["to"] = getattr(row, to_col, None)
+                                        if token_col:
+                                            event_action["token"] = getattr(row, token_col, None)
+                                        if amount_col:
+                                            amount_val = getattr(row, amount_col, None)
+                                            if amount_val is not None and not (isinstance(amount_val, float) and np.isnan(amount_val)):
+                                                try:
+                                                    amount_val = int(amount_val)
+                                                except Exception:
+                                                    amount_val = str(amount_val)
+                                            event_action["amount"] = amount_val
+                                        event_actions_by_tx.setdefault(txh, []).append(event_action)
+
             # process each receipt in bucket (use name=None to avoid pandas renaming issues for leading-underscore columns)
             for idx, addr, w0, w1, receipt_ts in df_b[["_idx", "_recv", "_window_start", "_window_end", "_ts"]].itertuples(index=False, name=None):
 
@@ -311,15 +499,16 @@ def build_episodes_for_receipts(
                             # keep as string
                             val_out = str(val)
 
-                    actions.append(
-                        {
-                            "ts": ts_iso(pd.Timestamp(ts) if ts is not None else None),
-                            "tx_hash": txh,
-                            "to": to,
-                            "value": val_out,
-                            "method_id": method_id,
-                        }
-                    )
+                    action = {
+                        "ts": ts_iso(pd.Timestamp(ts) if ts is not None else None),
+                        "tx_hash": txh,
+                        "to": to,
+                        "value": val_out,
+                        "method_id": method_id,
+                    }
+                    if txh and event_actions_by_tx:
+                        action["events"] = event_actions_by_tx.get(txh, [])
+                    actions.append(action)
 
                 first_tx = actions[0]["tx_hash"] if actions else None
                 last_tx = actions[-1]["tx_hash"] if actions else None
@@ -360,6 +549,7 @@ def process_one_file(
     in_path: str,
     out_path: str,
     tx_cache: TxDatasetCache,
+    events_cache: Optional[DecodedEventsDatasetCache],
     recv_col: Optional[str],
     chain_col: Optional[str],
     ts_col: Optional[str],
@@ -370,6 +560,7 @@ def process_one_file(
     max_txs_per_episode: int,
     batch_rows: int,
     tx_addr_chunk: int,
+    event_hash_chunk: int,
     allowed_chains: Optional[set] = None,
     limit_rows: Optional[int] = None,
 ) -> None:
@@ -453,11 +644,13 @@ def process_one_file(
         epi = build_episodes_for_receipts(
             receipts=receipts,
             tx_cache=tx_cache,
+            events_cache=events_cache,
             window_minutes=window_minutes,
             start_offset_minutes=start_offset_minutes,
             bucket_minutes=bucket_minutes,
             max_txs_per_episode=max_txs_per_episode,
             tx_addr_chunk=tx_addr_chunk,
+            event_hash_chunk=event_hash_chunk,
         )
 
         # align episode result back to batch row positions
@@ -513,6 +706,11 @@ def main() -> None:
         help="包含 <chain>/transactions 的根目录",
     )
     ap.add_argument(
+        "--decoded_events_root",
+        default=None,
+        help="包含 <chain>/decoded_events 的根目录（默认同 --tx_root）",
+    )
+    ap.add_argument(
         "--out_root",
         default="/home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes",
         help="输出根目录，保持相对路径",
@@ -534,6 +732,7 @@ def main() -> None:
 
     ap.add_argument("--batch_rows", type=int, default=20000, help="每次从 crossdata parquet 读多少行")
     ap.add_argument("--tx_addr_chunk", type=int, default=2000, help="transactions 扫描时，isin 地址集合分块大小")
+    ap.add_argument("--event_hash_chunk", type=int, default=2000, help="decoded_events 扫描时，isin tx_hash 分块大小")
     ap.add_argument("--limit_files", type=int, default=None, help="调试：只处理前 N 个文件")
     ap.add_argument("--limit_rows", type=int, default=None, help="调试：每个文件最多处理多少行")
 
@@ -550,6 +749,8 @@ def main() -> None:
 
     print(f"[INFO] crossdata files={len(files)} root={cross_root}")
     tx_cache = TxDatasetCache(args.tx_root)
+    events_root = args.decoded_events_root or args.tx_root
+    events_cache = DecodedEventsDatasetCache(events_root)
 
     for in_path in tqdm(files, desc="episode files"):
         rel = os.path.relpath(in_path, cross_root)
@@ -558,6 +759,7 @@ def main() -> None:
             in_path=in_path,
             out_path=out_path,
             tx_cache=tx_cache,
+            events_cache=events_cache,
             recv_col=args.recv_col,
             chain_col=args.chain_col,
             ts_col=args.ts_col,
@@ -568,6 +770,7 @@ def main() -> None:
             max_txs_per_episode=args.max_txs_per_episode,
             batch_rows=args.batch_rows,
             tx_addr_chunk=args.tx_addr_chunk,
+            event_hash_chunk=args.event_hash_chunk,
             allowed_chains=allowed_chains,
             limit_rows=args.limit_rows,
         )
