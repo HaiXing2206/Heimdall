@@ -34,11 +34,14 @@ from tqdm import tqdm
 # Optional project imports
 # ----------------------------
 try:
-    from crossdata_schema import detect_crossdata_columns, canonical_chain, to_utc_ts
+    from crossdata_schema import detect_crossdata_columns, detect_crossdata_source_columns, canonical_chain, to_utc_ts
 except Exception:  # pragma: no cover
 
     def detect_crossdata_columns(cols: Sequence[str]):
         return None, None, None, None
+
+    def detect_crossdata_source_columns(cols: Sequence[str]):
+        return None, None, None
 
     def canonical_chain(x: object) -> Optional[str]:
         if x is None:
@@ -591,7 +594,9 @@ def build_episodes_for_receipts(
     receipts["_dst_bucket"] = receipts["_dst_start"].dt.floor(f"{bucket_minutes}min")
 
     # src pre window (optional)
-    has_src = ("_src_chain" in receipts.columns) and ("_src_addr" in receipts.columns)
+    has_src = ("_src_chain" in receipts.columns) and (
+        ("_src_addr" in receipts.columns) or ("_src_tx_hash" in receipts.columns)
+    )
     if has_src:
         receipts["_src_end"] = receipts["_ts"] + pd.to_timedelta(pre_end_offset_minutes, unit="m")
         receipts["_src_start"] = receipts["_src_end"] - pd.to_timedelta(pre_window_minutes, unit="m")
@@ -818,8 +823,13 @@ def build_episodes_for_receipts(
     # 2) src_pre actions
     src_actions_by_idx: Dict[int, List[Dict[str, object]]] = {}
     if has_src:
-        src_df = receipts[["_idx", "_src_chain", "_src_addr", "_src_start", "_src_end", "_src_bucket", "_ts"]].copy()
-        src_df = src_df.dropna(subset=["_src_chain", "_src_addr", "_src_start", "_src_end"]).copy()
+        src_cols = ["_idx", "_src_chain", "_src_start", "_src_end", "_src_bucket", "_ts"]
+        if "_src_addr" in receipts.columns:
+            src_cols.append("_src_addr")
+        if "_src_tx_hash" in receipts.columns:
+            src_cols.append("_src_tx_hash")
+        src_df = receipts[src_cols].copy()
+        src_df = src_df.dropna(subset=["_src_chain", "_src_start", "_src_end"]).copy()
         if not src_df.empty:
             src_df = src_df.rename(
                 columns={
@@ -830,12 +840,39 @@ def build_episodes_for_receipts(
                     "_src_bucket": "_bucket",
                 }
             )
+            if "_src_tx_hash" in src_df.columns:
+                src_df["_src_tx_hash"] = src_df["_src_tx_hash"].astype(str).str.lower()
             for chain, df_chain in src_df.groupby("_chain", dropna=True):
                 if chain is None:
                     continue
                 for _, df_b in df_chain.groupby("_bucket"):
                     if df_b.empty:
                         continue
+                    if "_src_tx_hash" in df_b.columns:
+                        tx_hashes = (
+                            df_b["_src_tx_hash"].dropna().astype(str).str.lower().unique().tolist()
+                        )
+                        if tx_hashes:
+                            txds = tx_cache.get(chain)
+                            t_start = pd.to_datetime(df_b["_window_start"].min(), utc=True)
+                            t_end = pd.to_datetime(df_b["_window_end"].max(), utc=True)
+                            tx_cols = [c for c in ["transaction_hash", "from_address"] if c in txds.available_cols]
+                            if tx_cols:
+                                tx_tbl = txds.scan_by_hashes(
+                                    tx_hashes,
+                                    t_start,
+                                    t_end,
+                                    columns=tx_cols,
+                                    hash_chunk=tx_addr_chunk,
+                                )
+                                txdf = tx_tbl.to_pandas() if tx_tbl.num_rows else pd.DataFrame(columns=tx_cols)
+                                if not txdf.empty:
+                                    txdf["transaction_hash"] = txdf["transaction_hash"].astype(str).str.lower()
+                                    if "from_address" in txdf.columns:
+                                        txdf["from_address"] = txdf["from_address"].apply(_normalize_addr)
+                                    tx_from = txdf.set_index("transaction_hash")["from_address"].to_dict()
+                                    df_b = df_b.copy()
+                                    df_b["_addr"] = df_b["_src_tx_hash"].map(tx_from).fillna(df_b.get("_addr"))
                     # reuse collector with actor_col name '_addr'
                     df_b2 = df_b.rename(columns={"_addr": "_recv"})
                     src_actions_by_idx.update(
@@ -974,12 +1011,13 @@ def process_one_file(
 
         # optional src chain/address
         cols_in = tbl_in.column_names
-        src_chain_col = pick_col(cols_in, ["SOURCE_CHAIN", "source_chain", "SRC_CHAIN", "src_chain"])
-        src_addr_col = pick_col(cols_in, ["SOURCE_ADDRESS", "source_address", "SRC_ADDRESS", "src_address", "FROM", "from", "SOURCE_FROM", "source_from"])
+        src_chain_col, src_addr_col, src_hash_col = detect_crossdata_source_columns(cols_in)
         if src_chain_col and src_chain_col in cols_in:
             need_cols.append(src_chain_col)
         if src_addr_col and src_addr_col in cols_in:
             need_cols.append(src_addr_col)
+        if src_hash_col and src_hash_col in cols_in:
+            need_cols.append(src_hash_col)
 
         df_need = tbl_in.select(need_cols).to_pandas()
         n = len(df_need)
@@ -1010,6 +1048,12 @@ def process_one_file(
             receipts["_src_addr"] = df_need[src_addr_col].astype(str).str.lower()
         else:
             receipts["_src_addr"] = None
+        if src_hash_col and src_hash_col in df_need.columns:
+            receipts["_src_tx_hash"] = df_need[src_hash_col].astype(str).str.lower()
+        elif id_col and id_col in df_need.columns:
+            receipts["_src_tx_hash"] = df_need[id_col].astype(str).str.lower()
+        else:
+            receipts["_src_tx_hash"] = None
 
         # drop invalid
         receipts = receipts[receipts["_recv"].astype(str).str.startswith("0x") & receipts["_ts"].notna()].copy()
