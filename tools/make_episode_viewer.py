@@ -179,6 +179,7 @@ function renderDetail(ep) {{
       </div>
     </div>
     <h4>Actions</h4>
+    <div class="muted">events_preview 来自 decoded_events 的 enrichment（若为空表示该 tx 未匹配到事件或未写入 events 字段）。</div>
   `;
 
   let rows = '';
@@ -188,19 +189,37 @@ function renderDetail(ep) {{
     const to  = a.to || '';
     const val = (a.value === null || a.value === undefined) ? '' : String(a.value);
     const mid = a.method_id || '';
+
+    const evs = Array.isArray(a.events) ? a.events : [];
+    const evCount = evs.length;
+
+    // Build a small preview string for first 3 events
+    let previewLines = [];
+    for (const e of evs.slice(0, 3)) {{
+      const en = e.event_name || e.event_signature || '';
+      const ct = e.contract || e.token || '';
+      const amt = (e.amount === null || e.amount === undefined) ? '' : String(e.amount);
+      const extra = amt ? ` amt=${{amt}}` : '';
+      previewLines.push(`${{en}} ${{ct}}${{extra}}`.trim());
+    }}
+    const preview = previewLines.join("\\n");
+    const previewHtml = preview ? `<pre style="margin:0;white-space:pre-wrap;">${{preview}}</pre>` : '';
+
     rows += `<tr>
       <td>${{ts}}</td>
       <td>${{txLink(txh)}}</td>
       <td>${{to}}</td>
       <td>${{val}}</td>
       <td>${{mid}}</td>
+      <td>${{evCount}}</td>
+      <td>${{previewHtml}}</td>
     </tr>`;
   }}
 
   const table = `
     <table class="display" style="width:100%">
       <thead>
-        <tr><th>ts</th><th>tx_hash</th><th>to</th><th>value</th><th>method_id</th></tr>
+        <tr><th>ts</th><th>tx_hash</th><th>to</th><th>value</th><th>method_id</th><th>events_count</th><th>events_preview</th></tr>
       </thead>
       <tbody>${{rows}}</tbody>
     </table>
