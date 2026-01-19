@@ -146,6 +146,34 @@ def detect_crossdata_columns(cols: Sequence[str]) -> Tuple[Optional[str], Option
 
     return recv_col, chain_col, ts_col, id_col
 
+
+def detect_crossdata_source_columns(
+    cols: Sequence[str],
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    返回 (src_chain_col, src_addr_col, src_tx_hash_col)
+    找不到则返回 None（由调用方决定 fallback）
+    """
+    src_chain_col = _pick_col(
+        cols,
+        keys=["source_chain", "SOURCE_CHAIN", "src_chain", "SRC_CHAIN"],
+        contains=[("source", "chain"), ("src", "chain")],
+    )
+
+    src_addr_col = _pick_col(
+        cols,
+        keys=["source_address", "SOURCE_ADDRESS", "src_address", "SRC_ADDRESS", "sender", "SENDER", "receiver", "RECEIVER"],
+        contains=[("source", "address"), ("src", "address"), ("sender",), ("receiver",)],
+    )
+
+    src_tx_hash_col = _pick_col(
+        cols,
+        keys=["source_tx_hash", "SOURCE_TX_HASH", "src_tx_hash", "SRC_TX_HASH", "source_hash", "SOURCE_HASH", "src_hash", "SRC_HASH"],
+        contains=[("source", "hash"), ("src", "hash"), ("tx", "hash")],
+    )
+
+    return src_chain_col, src_addr_col, src_tx_hash_col
+
 def canonical_chain(x) -> Optional[str]:
     if x is None:
         return None
