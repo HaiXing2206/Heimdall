@@ -1019,6 +1019,10 @@ def process_one_file(
         if src_hash_col and src_hash_col in cols_in:
             need_cols.append(src_hash_col)
 
+        # de-duplicate while preserving order; duplicated names can make
+        # df[col] return a DataFrame (instead of Series), breaking .str ops.
+        need_cols = list(dict.fromkeys(need_cols))
+
         df_need = tbl_in.select(need_cols).to_pandas()
         n = len(df_need)
         if n == 0:
