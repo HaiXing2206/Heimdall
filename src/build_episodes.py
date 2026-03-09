@@ -190,6 +190,18 @@ def chunked(seq: Sequence, n: int) -> Iterable[Sequence]:
         yield seq[i : i + n]
 
 
+def concat_tables_compat(tables: Sequence[pa.Table]) -> pa.Table:
+    """Compatibility wrapper for pyarrow.concat_tables API changes."""
+    if len(tables) == 1:
+        return tables[0]
+    try:
+        # pyarrow>=14
+        return pa.concat_tables(list(tables), promote_options="default")
+    except TypeError:
+        # older pyarrow
+        return pa.concat_tables(list(tables), promote=True)
+
+
 def pick_col(cols: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
     low = {c.lower(): c for c in cols}
     for c in candidates:
@@ -260,7 +272,7 @@ class TxDataset:
             empty_arrays = {c: pa.array([], type=self.schema.field(c).type) for c in cols}
             return pa.table(empty_arrays)
 
-        return tables[0] if len(tables) == 1 else pa.concat_tables(tables, promote=True)
+        return concat_tables_compat(tables)
 
     def scan_by_hashes(
         self,
@@ -294,7 +306,7 @@ class TxDataset:
         if not tables:
             empty_arrays = {c: pa.array([], type=self.schema.field(c).type) for c in cols}
             return pa.table(empty_arrays)
-        return tables[0] if len(tables) == 1 else pa.concat_tables(tables, promote=True)
+        return concat_tables_compat(tables)
 
 
 class TxDatasetCache:
@@ -373,7 +385,7 @@ class DecodedEventsDataset:
             empty_arrays = {c: pa.array([], type=self.schema.field(c).type) for c in cols}
             return pa.table(empty_arrays)
 
-        return tables[0] if len(tables) == 1 else pa.concat_tables(tables, promote=True)
+        return concat_tables_compat(tables)
 
 
 class DecodedEventsDatasetCache:
@@ -639,7 +651,7 @@ def build_episodes_for_receipts(
         tx_tbl = None
         non_empty = [t for t in tx_tables if t is not None and getattr(t, "num_rows", 0) > 0]
         if non_empty:
-            tx_tbl = non_empty[0] if len(non_empty) == 1 else pa.concat_tables(non_empty, promote=True)
+            tx_tbl = concat_tables_compat(non_empty)
         else:
             tx_tbl = pa.table({c: pa.array([], type=txds.schema.field(c).type) for c in tx_cols})
 
@@ -1018,6 +1030,10 @@ def process_one_file(
             need_cols.append(src_addr_col)
         if src_hash_col and src_hash_col in cols_in:
             need_cols.append(src_hash_col)
+
+        # de-duplicate while preserving order; duplicated names can make
+        # df[col] return a DataFrame (instead of Series), breaking .str ops.
+        need_cols = list(dict.fromkeys(need_cols))
 
         df_need = tbl_in.select(need_cols).to_pandas()
         n = len(df_need)
