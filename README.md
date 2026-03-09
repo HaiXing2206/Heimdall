@@ -1,14 +1,10 @@
-# Heimdall 运行说明
+# Heimdall：构建 Episode 使用说明
 
-这个仓库目前主要包含 3 个可执行脚本：
+这份文档只关注一件事：**运行 `src/build_episodes.py` 构建 episode**。
 
-- `src/build_episodes.py`：基于 crossdata 与链上交易/事件数据构建 episode。
-- `src/episode_to_actiontrace.py`：把 episode 展开为按交易粒度的 ActionTrace。
-- `tools/make_episode_viewer.py`：把 episode 导出成可浏览的 HTML 视图。
+## 1) 先安装依赖
 
-## 1) 环境准备
-
-建议 Python 3.10+，安装依赖：
+建议 Python 3.10+。
 
 ```bash
 python -m venv .venv
@@ -17,72 +13,73 @@ pip install -U pip
 pip install pandas numpy pyarrow tqdm
 ```
 
-## 2) 先看参数（推荐）
+## 2) 查看可用参数
 
 ```bash
 python src/build_episodes.py --help
-python src/episode_to_actiontrace.py --help
-python tools/make_episode_viewer.py --help
-python inspect_tx_schema.py --help
 ```
 
-## 3) 典型执行流程
+## 3) 你的 crossdata 目录示例
 
-### Step A：构建 episode
+你的数据文件看起来是按链分别放在目录里，文件名按日期切分，例如：
 
-默认输入输出路径写在 `build_episodes.py` 里：
+```bash
+~/zl/chain/crossdata/arbitrum/
+  2025-09-01_arbitrum.parquet
+  2025-09-02_arbitrum.parquet
+  ...
+  2025-11-06_arbitrum.parquet
+```
 
-- `--crossdata_root` 默认 `/home/chain1/zl/chain/crossdata`
-- `--tx_root` 默认 `/home/chain1/zl/chain`
-- `--out_root` 默认 `/home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes`
+这类目录结构可以直接用于 `--crossdata_root`。
 
-最小示例：
+## 4) 直接运行构建 Episode
+
+> 下面给的是**显式传参**写法，不依赖默认值。
 
 ```bash
 python src/build_episodes.py \
-  --crossdata_root /your/crossdata \
-  --tx_root /your/chain_root \
-  --out_root /your/out/crossdata_with_episodes \
+  --crossdata_root /home/chain1/zl/chain/crossdata \
+  --tx_root /home/chain1/zl/chain \
+  --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes \
+  --chains arbitrum
+```
+
+如果你想一次跑多条链：
+
+```bash
+python src/build_episodes.py \
+  --crossdata_root /home/chain1/zl/chain/crossdata \
+  --tx_root /home/chain1/zl/chain \
+  --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes \
   --chains eth,arbitrum,optimism
 ```
 
-如需加速调试，可限制处理规模：
+## 5) 先小规模试跑（推荐）
+
+先用小规模验证路径和字段是否正确，再跑全量：
 
 ```bash
 python src/build_episodes.py \
-  --crossdata_root /your/crossdata \
-  --tx_root /your/chain_root \
-  --out_root /your/out/crossdata_with_episodes \
+  --crossdata_root /home/chain1/zl/chain/crossdata \
+  --tx_root /home/chain1/zl/chain \
+  --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes_debug \
+  --chains arbitrum \
   --limit_files 2 \
   --limit_rows 10000
 ```
 
-### Step B：episode 转 ActionTrace
+## 6) 输入/输出目录关系（构建 episode 必需）
 
-```bash
-python src/episode_to_actiontrace.py \
-  --episodes_root /your/out/crossdata_with_episodes \
-  --tx_root /your/chain_root \
-  --out_path /your/out/actiontrace.parquet
-```
+对 `arbitrum` 来说，通常会读取：
 
-### Step C：导出 HTML 预览
+- Crossdata 输入：`/home/chain1/zl/chain/crossdata/arbitrum/*.parquet`
+- 交易输入：`/home/chain1/zl/chain/arbitrum/transactions/*.parquet`
+- 事件输入（可选 enrichment）：`/home/chain1/zl/chain/arbitrum/decoded_events/*.parquet`
+- 输出目录：`/home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes/...`
 
-```bash
-python tools/make_episode_viewer.py \
-  --input /your/out/crossdata_with_episodes/part-00000.parquet \
-  --output /your/out/episode_viewer.html
-```
+## 7) 常见问题
 
-## 4) 数据目录约定
-
-脚本会按下面结构查找链数据（以 `eth` 为例）：
-
-- `/<tx_root>/eth/transactions/*.parquet`
-- `/<tx_root>/eth/decoded_events/*.parquet`（若启用事件 enrichment）
-
-## 5) 常见问题
-
-- 报错找不到 `transactions` 目录：确认 `--tx_root/<chain>/transactions` 是否存在。
-- 处理很慢：先用 `--limit_files`/`--limit_rows` 小样本验证，再全量跑。
-- 没有事件明细：可检查是否有 `decoded_events` 数据，或将 `--enrich_events 1` 打开。
+- `ModuleNotFoundError: No module named 'numpy'`：说明依赖没装全，重新执行第 1 步。
+- 报错找不到 `transactions`：检查 `--tx_root/<chain>/transactions` 是否存在。
+- 运行慢：先用 `--limit_files` / `--limit_rows` 做小样本验证，再全量跑。
