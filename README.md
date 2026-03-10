@@ -77,6 +77,9 @@ python src/build_episodes.py \
 
 `build_episodes.py` 现在支持按时间窗口只加载有重叠的 parquet 文件。先生成时间索引：
 
+> `tools/build_time_index.py` 是一个**手动执行**的独立脚本；`build_episodes.py` 不会自动调用它。
+> 你先生成好 JSON，后续程序只负责读取这些 JSON。
+
 ```bash
 python tools/build_time_index.py \
   --base_dir /home/chain1/zl/chain \

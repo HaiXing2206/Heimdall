@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Standalone tool to generate *_time_index.json.
+
+This script is designed to be run manually before episode building.
+It is not invoked by other modules.
+"""
 
 from __future__ import annotations
 
@@ -16,11 +21,10 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-SRC_DIR = ROOT_DIR / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-from parquet_io import iter_parquet_files
+from src.parquet_io import iter_parquet_files
 
 TIMESTAMP_COL = "block_timestamp"
 TARGET_DIRS = ("transactions", "decoded_events", "logs")
