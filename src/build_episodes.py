@@ -1203,7 +1203,7 @@ def main() -> None:
     ap.add_argument("--event_hash_chunk", type=int, default=2000)
     ap.add_argument("--limit_files", type=int, default=None)
     ap.add_argument("--limit_rows", type=int, default=None)
-    ap.add_argument("--time_index_dir", default=None, help="directory of *_time_index.json files")
+    ap.add_argument("--time_index_dir", default="/home/chain1/zl/chain/Heimdall/out/time_indexes", help="directory of *_time_index.json files")
     ap.add_argument("--force_time_index", type=int, default=0, help="1=missing time index then fail; 0=fallback to full-chain dataset")
 
     # new flags

@@ -41,7 +41,7 @@ python src/build_episodes.py --help
 python src/build_episodes.py \
   --crossdata_root /home/chain1/zl/chain/crossdata \
   --tx_root /home/chain1/zl/chain \
-  --time_index_dir /home/chain1/zl/chain/time_indexes \
+  --time_index_dir /home/chain1/zl/chain/Heimdall/out/time_indexes \
   --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes \
   --chains arbitrum
 ```
@@ -52,7 +52,7 @@ python src/build_episodes.py \
 python src/build_episodes.py \
   --crossdata_root /home/chain1/zl/chain/crossdata \
   --tx_root /home/chain1/zl/chain \
-  --time_index_dir /home/chain1/zl/chain/time_indexes \
+  --time_index_dir /home/chain1/zl/chain/Heimdall/out/time_indexes \
   --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes \
   --chains eth,arbitrum,optimism
 ```
@@ -65,7 +65,7 @@ python src/build_episodes.py \
 python src/build_episodes.py \
   --crossdata_root /home/chain1/zl/chain/crossdata \
   --tx_root /home/chain1/zl/chain \
-  --time_index_dir /home/chain1/zl/chain/time_indexes \
+  --time_index_dir /home/chain1/zl/chain/Heimdall/out/time_indexes \
   --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes_debug \
   --chains arbitrum \
   --limit_files 2 \
@@ -83,15 +83,15 @@ python src/build_episodes.py \
 ```bash
 python tools/build_time_index.py \
   --base_dir /home/chain1/zl/chain \
-  --out_dir /home/chain1/zl/chain/time_indexes \
+  --out_dir /home/chain1/zl/chain/Heimdall/out/time_indexes \
   --chains eth,arbitrum,optimism \
   --targets transactions,decoded_events
 ```
 
 生成后会得到类似：
 
-- `/home/chain1/zl/chain/time_indexes/arbitrum_transactions_time_index.json`
-- `/home/chain1/zl/chain/time_indexes/arbitrum_decoded_events_time_index.json`
+- `/home/chain1/zl/chain/Heimdall/out/time_indexes/arbitrum_transactions_time_index.json`
+- `/home/chain1/zl/chain/Heimdall/out/time_indexes/arbitrum_decoded_events_time_index.json`
 
 可选参数：
 

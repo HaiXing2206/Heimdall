@@ -147,7 +147,7 @@ def build_index_for_target(base_dir: str, chain: str, target: str, out_dir: Path
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base_dir", default=".")
-    ap.add_argument("--out_dir", default="time_indexes")
+    ap.add_argument("--out_dir", default="out/time_indexes")
     ap.add_argument("--chains", default="bsc,eth,polygon,arbitrum,optimism,base")
     ap.add_argument("--targets", default=",".join(TARGET_DIRS))
     args = ap.parse_args()
