@@ -30,6 +30,13 @@ import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
+from parquet_io import (
+    iter_parquet_files,
+    load_decoded_events_dataset,
+    load_transactions_dataset,
+    open_parquet_file,
+)
+
 # ----------------------------
 # Optional project imports
 # ----------------------------
@@ -319,11 +326,7 @@ class TxDatasetCache:
         if chain in self._cache:
             return self._cache[chain]
 
-        tx_dir = os.path.join(self.tx_root, chain, "transactions")
-        if not os.path.isdir(tx_dir):
-            raise FileNotFoundError(f"[tx] 未找到 transactions 目录: {tx_dir}")
-
-        dset = ds.dataset(tx_dir, format="parquet")
+        dset = load_transactions_dataset(self.tx_root, chain)
         txds = TxDataset(chain=chain, dataset=dset)
         self._cache[chain] = txds
         return txds
@@ -398,11 +401,9 @@ class DecodedEventsDatasetCache:
         if chain in self._cache:
             return self._cache[chain]
 
-        events_dir = os.path.join(self.events_root, chain, "decoded_events")
-        if not os.path.isdir(events_dir):
+        dset = load_decoded_events_dataset(self.events_root, chain)
+        if dset is None:
             return None
-
-        dset = ds.dataset(events_dir, format="parquet")
         evds = DecodedEventsDataset(chain=chain, dataset=dset)
         self._cache[chain] = evds
         return evds
@@ -939,16 +940,6 @@ def build_episodes_for_receipts(
 # File processing
 # ----------------------------
 
-def iter_parquet_files(root: str) -> List[str]:
-    out = []
-    for dirpath, _, filenames in os.walk(root):
-        for fn in filenames:
-            if fn.endswith(".parquet"):
-                out.append(os.path.join(dirpath, fn))
-    out.sort()
-    return out
-
-
 def process_one_file(
     in_path: str,
     out_path: str,
@@ -973,7 +964,7 @@ def process_one_file(
     allowed_chains: Optional[set] = None,
     limit_rows: Optional[int] = None,
 ) -> None:
-    pf = pq.ParquetFile(in_path)
+    pf = open_parquet_file(in_path)
     cols = pf.schema.names
 
     auto_recv, auto_chain, auto_ts, auto_id = detect_crossdata_columns(cols)
