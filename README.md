@@ -78,7 +78,7 @@ python src/build_episodes.py \
 `build_episodes.py` 现在支持按时间窗口只加载有重叠的 parquet 文件。先生成时间索引：
 
 ```bash
-python src/build_time_index.py \
+python tools/build_time_index.py \
   --base_dir /home/chain1/zl/chain \
   --out_dir /home/chain1/zl/chain/time_indexes \
   --chains eth,arbitrum,optimism \
