@@ -41,6 +41,7 @@ python src/build_episodes.py --help
 python src/build_episodes.py \
   --crossdata_root /home/chain1/zl/chain/crossdata \
   --tx_root /home/chain1/zl/chain \
+  --time_index_dir /home/chain1/zl/chain/time_indexes \
   --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes \
   --chains arbitrum
 ```
@@ -51,6 +52,7 @@ python src/build_episodes.py \
 python src/build_episodes.py \
   --crossdata_root /home/chain1/zl/chain/crossdata \
   --tx_root /home/chain1/zl/chain \
+  --time_index_dir /home/chain1/zl/chain/time_indexes \
   --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes \
   --chains eth,arbitrum,optimism
 ```
@@ -63,13 +65,37 @@ python src/build_episodes.py \
 python src/build_episodes.py \
   --crossdata_root /home/chain1/zl/chain/crossdata \
   --tx_root /home/chain1/zl/chain \
+  --time_index_dir /home/chain1/zl/chain/time_indexes \
   --out_root /home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes_debug \
   --chains arbitrum \
   --limit_files 2 \
   --limit_rows 10000
 ```
 
-## 6) 输入/输出目录关系（构建 episode 必需）
+
+## 6) 先生成时间索引 JSON（强烈建议）
+
+`build_episodes.py` 现在支持按时间窗口只加载有重叠的 parquet 文件。先生成时间索引：
+
+```bash
+python src/build_time_index.py \
+  --base_dir /home/chain1/zl/chain \
+  --out_dir /home/chain1/zl/chain/time_indexes \
+  --chains eth,arbitrum,optimism \
+  --targets transactions,decoded_events
+```
+
+生成后会得到类似：
+
+- `/home/chain1/zl/chain/time_indexes/arbitrum_transactions_time_index.json`
+- `/home/chain1/zl/chain/time_indexes/arbitrum_decoded_events_time_index.json`
+
+可选参数：
+
+- `--force_time_index 1`：如果没命中索引文件，直接报错；
+- 默认 `--force_time_index 0`：未命中时回退为整链 dataset（兼容旧行为）。
+
+## 7) 输入/输出目录关系（构建 episode 必需）
 
 对 `arbitrum` 来说，通常会读取：
 
@@ -78,7 +104,7 @@ python src/build_episodes.py \
 - 事件输入（可选 enrichment）：`/home/chain1/zl/chain/arbitrum/decoded_events/*.parquet`
 - 输出目录：`/home/chain1/zl/chain/Heimdall/out/crossdata_with_episodes/...`
 
-## 7) 常见问题
+## 8) 常见问题
 
 - `ModuleNotFoundError: No module named 'numpy'`：说明依赖没装全，重新执行第 1 步。
 - 报错找不到 `transactions`：检查 `--tx_root/<chain>/transactions` 是否存在。
