@@ -32,9 +32,11 @@ from tqdm import tqdm
 
 from parquet_io import (
     iter_parquet_files,
+    load_time_index_json,
     load_decoded_events_dataset,
     load_transactions_dataset,
     open_parquet_file,
+    select_files_by_time_index,
 )
 
 # ----------------------------
@@ -317,18 +319,47 @@ class TxDataset:
 
 
 class TxDatasetCache:
-    def __init__(self, tx_root: str):
+    def __init__(self, tx_root: str, time_index_dir: Optional[str] = None, force_time_index: bool = False):
         self.tx_root = os.path.expanduser(tx_root)
-        self._cache: Dict[str, TxDataset] = {}
+        self.time_index_dir = os.path.expanduser(time_index_dir) if time_index_dir else None
+        self.force_time_index = bool(force_time_index)
+        self._dataset_cache: Dict[Tuple[str, Tuple[str, ...]], TxDataset] = {}
+        self._time_index_cache: Dict[str, Optional[dict]] = {}
 
-    def get(self, chain: str) -> TxDataset:
+    def _load_time_index(self, chain: str) -> Optional[dict]:
+        if chain in self._time_index_cache:
+            return self._time_index_cache[chain]
+        if not self.time_index_dir:
+            self._time_index_cache[chain] = None
+            return None
+        path = os.path.join(self.time_index_dir, f"{chain}_transactions_time_index.json")
+        obj = load_time_index_json(path)
+        self._time_index_cache[chain] = obj
+        return obj
+
+    def get_for_timerange(self, chain: str, start: pd.Timestamp, end: pd.Timestamp) -> TxDataset:
         chain = canonical_chain(chain) or chain
-        if chain in self._cache:
-            return self._cache[chain]
+        index_obj = self._load_time_index(chain)
+        files = select_files_by_time_index(index_obj, start, end) if index_obj else []
 
-        dset = load_transactions_dataset(self.tx_root, chain)
+        if files:
+            file_key = tuple(sorted(files))
+            key = (chain, file_key)
+            if key in self._dataset_cache:
+                return self._dataset_cache[key]
+            dset = ds.dataset(files, format="parquet")
+        else:
+            if self.force_time_index:
+                raise FileNotFoundError(
+                    f"[time_index] 未命中 transactions time index: chain={chain} dir={self.time_index_dir}"
+                )
+            key = (chain, ("__FULL_CHAIN__",))
+            if key in self._dataset_cache:
+                return self._dataset_cache[key]
+            dset = load_transactions_dataset(self.tx_root, chain)
+
         txds = TxDataset(chain=chain, dataset=dset)
-        self._cache[chain] = txds
+        self._dataset_cache[key] = txds
         return txds
 
 
@@ -392,20 +423,50 @@ class DecodedEventsDataset:
 
 
 class DecodedEventsDatasetCache:
-    def __init__(self, events_root: str):
+    def __init__(self, events_root: str, time_index_dir: Optional[str] = None, force_time_index: bool = False):
         self.events_root = os.path.expanduser(events_root)
-        self._cache: Dict[str, DecodedEventsDataset] = {}
+        self.time_index_dir = os.path.expanduser(time_index_dir) if time_index_dir else None
+        self.force_time_index = bool(force_time_index)
+        self._dataset_cache: Dict[Tuple[str, Tuple[str, ...]], Optional[DecodedEventsDataset]] = {}
+        self._time_index_cache: Dict[str, Optional[dict]] = {}
 
-    def get(self, chain: str) -> Optional[DecodedEventsDataset]:
-        chain = canonical_chain(chain) or chain
-        if chain in self._cache:
-            return self._cache[chain]
-
-        dset = load_decoded_events_dataset(self.events_root, chain)
-        if dset is None:
+    def _load_time_index(self, chain: str) -> Optional[dict]:
+        if chain in self._time_index_cache:
+            return self._time_index_cache[chain]
+        if not self.time_index_dir:
+            self._time_index_cache[chain] = None
             return None
+        path = os.path.join(self.time_index_dir, f"{chain}_decoded_events_time_index.json")
+        obj = load_time_index_json(path)
+        self._time_index_cache[chain] = obj
+        return obj
+
+    def get_for_timerange(self, chain: str, start: pd.Timestamp, end: pd.Timestamp) -> Optional[DecodedEventsDataset]:
+        chain = canonical_chain(chain) or chain
+        index_obj = self._load_time_index(chain)
+        files = select_files_by_time_index(index_obj, start, end) if index_obj else []
+
+        if files:
+            file_key = tuple(sorted(files))
+            key = (chain, file_key)
+            if key in self._dataset_cache:
+                return self._dataset_cache[key]
+            dset = ds.dataset(files, format="parquet")
+        else:
+            if self.force_time_index:
+                raise FileNotFoundError(
+                    f"[time_index] 未命中 decoded_events time index: chain={chain} dir={self.time_index_dir}"
+                )
+            key = (chain, ("__FULL_CHAIN__",))
+            if key in self._dataset_cache:
+                return self._dataset_cache[key]
+            dset = load_decoded_events_dataset(self.events_root, chain)
+            if dset is None:
+                self._dataset_cache[key] = None
+                return None
+
         evds = DecodedEventsDataset(chain=chain, dataset=dset)
-        self._cache[chain] = evds
+        self._dataset_cache[key] = evds
         return evds
 
 
@@ -635,11 +696,10 @@ def build_episodes_for_receipts(
         if not actors:
             return {}
 
-        txds = tx_cache.get(chain)
-
         # time window to scan (union)
         t_start = pd.to_datetime(df_b[start_col].min(), utc=True)
         t_end = pd.to_datetime(df_b[end_col].max(), utc=True)
+        txds = tx_cache.get_for_timerange(chain, t_start, t_end)
 
         # scan txs: from_address in actors, and optionally to_address in actors
         tx_cols = [c for c in TX_REQUIRED_COLS if c in txds.available_cols]
@@ -678,7 +738,7 @@ def build_episodes_for_receipts(
         # Enrich events (optional)
         event_actions_by_tx: Dict[str, List[Dict[str, object]]] = {}
         if enrich_events and events_cache is not None:
-            evds = events_cache.get(chain)
+            evds = events_cache.get_for_timerange(chain, t_start, t_end)
             if evds is not None:
                 ev_cols = [c for c in EVENT_REQUIRED_COLS if c in evds.available_cols]
                 if ev_cols and (not txdf.empty) and ("transaction_hash" in txdf.columns):
@@ -866,9 +926,9 @@ def build_episodes_for_receipts(
                             df_b["_src_tx_hash"].dropna().astype(str).str.lower().unique().tolist()
                         )
                         if tx_hashes:
-                            txds = tx_cache.get(chain)
                             t_start = pd.to_datetime(df_b["_window_start"].min(), utc=True)
                             t_end = pd.to_datetime(df_b["_window_end"].max(), utc=True)
+                            txds = tx_cache.get_for_timerange(chain, t_start, t_end)
                             tx_cols = [c for c in ["transaction_hash", "from_address"] if c in txds.available_cols]
                             if tx_cols:
                                 tx_tbl = txds.scan_by_hashes(
@@ -1143,6 +1203,8 @@ def main() -> None:
     ap.add_argument("--event_hash_chunk", type=int, default=2000)
     ap.add_argument("--limit_files", type=int, default=None)
     ap.add_argument("--limit_rows", type=int, default=None)
+    ap.add_argument("--time_index_dir", default=None, help="directory of *_time_index.json files")
+    ap.add_argument("--force_time_index", type=int, default=0, help="1=missing time index then fail; 0=fallback to full-chain dataset")
 
     # new flags
     ap.add_argument("--enrich_events", type=int, default=1, help="1=attach decoded_events into actions; 0=no")
@@ -1163,9 +1225,20 @@ def main() -> None:
 
     print(f"[INFO] crossdata files={len(files)} root={cross_root}")
 
-    tx_cache = TxDatasetCache(args.tx_root)
-    events_root = args.decoded_events_root or args.tx_root
-    events_cache = DecodedEventsDatasetCache(events_root)
+    tx_cache = TxDatasetCache(
+        args.tx_root,
+        time_index_dir=args.time_index_dir,
+        force_time_index=bool(args.force_time_index),
+    )
+
+    events_cache = None
+    if args.enrich_events:
+        events_root = args.decoded_events_root or args.tx_root
+        events_cache = DecodedEventsDatasetCache(
+            events_root,
+            time_index_dir=args.time_index_dir,
+            force_time_index=bool(args.force_time_index),
+        )
 
     for in_path in tqdm(files, desc="episode files"):
         rel = os.path.relpath(in_path, cross_root)

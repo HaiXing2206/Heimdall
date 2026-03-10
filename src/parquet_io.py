@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import List, Optional
+
+import pandas as pd
 
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
@@ -41,3 +44,48 @@ def load_decoded_events_dataset(events_root: str, chain: str) -> Optional[ds.Dat
     if not os.path.isdir(events_dir):
         return None
     return ds.dataset(events_dir, format="parquet")
+
+
+def load_time_index_json(path: str) -> Optional[dict]:
+    """Load a time-index json file. Return None when missing/unreadable."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def select_files_by_time_index(index_obj: Optional[dict], start: pd.Timestamp, end: pd.Timestamp) -> List[str]:
+    """Select parquet files whose [min_ts,max_ts] overlaps [start,end)."""
+    if not index_obj:
+        return []
+
+    files = index_obj.get("files") or []
+    if not isinstance(files, list):
+        return []
+
+    s = pd.to_datetime(start, utc=True, errors="coerce")
+    e = pd.to_datetime(end, utc=True, errors="coerce")
+    if pd.isna(s) or pd.isna(e):
+        return []
+
+    selected: List[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+
+        fp = item.get("file")
+        if not fp:
+            continue
+
+        min_ts = pd.to_datetime(item.get("min_ts"), utc=True, errors="coerce")
+        max_ts = pd.to_datetime(item.get("max_ts"), utc=True, errors="coerce")
+        if pd.isna(min_ts) or pd.isna(max_ts):
+            continue
+
+        # overlap when file_max >= start and file_min < end
+        if (max_ts >= s) and (min_ts < e):
+            selected.append(str(fp))
+    return selected
