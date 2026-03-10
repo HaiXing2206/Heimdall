@@ -546,7 +546,7 @@ def _decode_event_row(
         amount = None
 
         # args: list or dict
-        if isinstance(args_obj, list) and len(args_obj) >= 3:
+        if isinstance(args_obj, (list, tuple)) and len(args_obj) >= 3:
             from_addr = _normalize_addr(args_obj[0])
             to_addr = _normalize_addr(args_obj[1])
             try:
@@ -588,7 +588,7 @@ def _decode_event_row(
         spender = None
         amount = None
 
-        if isinstance(args_obj, list) and len(args_obj) >= 3:
+        if isinstance(args_obj, (list, tuple)) and len(args_obj) >= 3:
             owner = _normalize_addr(args_obj[0])
             spender = _normalize_addr(args_obj[1])
             try:
